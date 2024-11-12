@@ -34,7 +34,7 @@ import pyclassfiller
 from pyclassfiller import code
 
 from .scancycle import ScanCycle
-
+from .progress import Progress
 
 #SUMMARY = "summary.fits"
 
@@ -50,6 +50,7 @@ class DiscosScanException(Exception):
         super(DiscosScanException, self).__init__(message)
 
 class DiscosScanConverter(object):
+
     def __init__(self, path=None, duty_cycle={}, skip_calibration=False):
         self.SUMMARY=glob.glob(path+'?um*.fits')
         self.scan_path = path
@@ -67,6 +68,8 @@ class DiscosScanConverter(object):
         self.section_current_val = "" # trick for Sardara Nodding
 
         self.backend_name = "" # i.e. [sar] "sardara" or [ska] "skarab". The value will be used to discriminate the type of data processing according to the backend 
+
+        self.scan_cycle_index = 0
 
     def skarab_duty_cycle(self):
        
@@ -157,7 +160,9 @@ class DiscosScanConverter(object):
       
        
     def convert_subscans(self, dest_dir=None):
-        
+               
+        # send data subscan, duty cycle size and scan number to an external class
+
         #print('***', len(self.subscans))
         #print('***', self.subscans[0][0]) # from "load_subscans" first index is the item number in the list, second index the value [0]=file name, [1] signal flag, [2]=time
         #print('***', self.duty_cycle_size)
@@ -167,7 +172,8 @@ class DiscosScanConverter(object):
         # This because feeds data are recorded in separate files (i.e. 6 'on' -> 12 'on' (for the second feed flag is however opposite)) 
         # if backend is skarab (i.e. data not merged) and the mode is Nodding (4 keys values in the dictionary self.duty_cycle)
         if((len(self.duty_cycle.keys()) == 4) and (self.backend_name == 'ska')):
-            self.skarab_duty_cycle()
+            #self.skarab_duty_cycle()
+            pass
 
         self.dest_dir = dest_dir
         if not self.dest_dir:
@@ -180,17 +186,29 @@ class DiscosScanConverter(object):
                     logger.error("cannot create output dir: %s" % (self.dest_dir,))
                     sys.exit(1)
 
+      
         for i in range(int(len(self.subscans) / self.duty_cycle_size)): 
             self.n_cycles += 1
-            scan_cycle = self.convert_cycle(i * self.duty_cycle_size)
+    
+            # set the current scan cycle value. Save the value after the write_observation function has the job completed        
+            self.scan_cycle_index = i
+
+            #print("self.n_cycles:", self.n_cycles)
+            print("len(self.subscans)", len(self.subscans))
+            print("self.duty_cycle_size", self.duty_cycle_size)
+
+            scan_cycle = self.convert_cycle(i * self.duty_cycle_size, i)
             self.write_observation(scan_cycle, i * self.duty_cycle_size) 
 
-    def convert_cycle(self, index):
+    def convert_cycle(self, index, current_cycle):
         current_index = index
+
+        #print("Current Cycle*** " , current_cycle)
 
         with fits.open(self.subscans[index][0]) as first_subscan:
             scan_cycle = ScanCycle(first_subscan["SECTION TABLE"].data, 
-                                   self.duty_cycle)
+                                   self.duty_cycle, self.backend_name, current_cycle)
+            #scan_cycle.setCurrentCycle(current_cycle)
 
             # Extract the feed information
             used_feeds = first_subscan["RF INPUTS"].data["feed"]
@@ -319,9 +337,27 @@ class DiscosScanConverter(object):
             mode = "_nod"
 
         onoffcal = scan_cycle.onoffcal()
+
         for sec_id, v in scan_cycle.data.items():
 
             for pol, data in v.items():
+
+                # For Skarab case Nodding (one file per each feed), because of the current section Table structure we need to add +2 to the value of the sec_id
+                # to read out ancialliary data for the secondary feed, as they are stored always in the raw index 2 and 3 
+                if((self.backend_name == 'ska') and (mode == "_nod")):
+
+                    print("write_observation - scan_cycle.getCurrentCycle()", scan_cycle.getCurrentCycle())
+                    
+                    if(int(scan_cycle.getCurrentCycle()) % 2 == 0):
+
+                        print("Duty Cycle index relative to the Primary Feed")
+
+                    else:
+
+                        print("Duty Cycle index relative to the Secondary Feed")
+                        # change to 2 the sec_id value
+                        sec_id = 2
+                    
                 logger.debug("opened section %d pol %s" % (sec_id, pol))
                 self._load_metadata(sec_id, pol, first_subscan_index)
 
@@ -451,6 +487,11 @@ class DiscosScanConverter(object):
                 # If n = 3 -> Position Switching
                 # If n = 4 -> Nodding
 
+                # For Skarab Nodding, we need to restore the sec_id values 
+                # since for each feed, relative raw data are stored in the sec_id = 0  
+                if((self.backend_name == 'ska') and (mode == "_nod")):
+                    sec_id = 0
+
                 if(len(self.duty_cycle.keys())) == 3:
                     on, off, cal = onoffcal[sec_id][pol]
                 else:
@@ -501,6 +542,9 @@ class DiscosScanConverter(object):
                     tsys = counts2kelvin * off_mean
                     obs.head.gen.tsys = tsys
                     logger.debug("tsys: %f" % (tsys,))
+
+                    print(on)
+                    print(off)
                    
                     obs.datay = ((on - off) / off ) * tsys # obs.datay has TYPE <class 'numpy.ndarray'>
                    
@@ -530,11 +574,18 @@ class DiscosScanConverter(object):
                 #print(obs.head.spe.line)
                 #print(obs.head.gen.teles)
 
+                #print(len(obs.datay))
+                #print(obs.datay[0:100])
+
                 #print("Final data", obs.datay[21:30])
                 #print("Final data", obs.datay[5140:5150])
 
                 obs.write()
                 self.file_class_out.close() 
+
+                # save the current scan cycle value to disk
+                with open('scan_cycle.txt', 'w') as output:
+                    output.write(str(int(self.scan_cycle_index)+1))
 
     def load_summary_info(self, summary_file_path=None):
         if not summary_file_path:

@@ -6,8 +6,6 @@ from PyQt5.QtCore import pyqtSignal
 from PyQt5.uic import loadUi
 from tkinter import filedialog
 
-import datetime
-import glob
 import os
 import threading
 import time
@@ -28,9 +26,21 @@ class MainUI(QMainWindow):
     updateChrText = pyqtSignal(object)
 
     duty_cycle_size = 0 # default value. Any time any combo box is changed, the value is updated and the verify button disabled
+    scan_cycles = [] # an array containing the number of scan cycles per each folder
+    scan_cycle = 0 # the current scan cycle under processing
     backend_name = ""
 
-    verify_result = [None]*3 # it contains the result of the duty cycle check 
+    subdirs = []
+
+    p_returncode = 0  
+    p_stderr = ""
+    p_stdout = ""
+
+    progress_timer = True
+
+    verify_result = [None]*4 # it contains the result of the duty cycle check 
+
+
 
     def __init__(self):
         super(MainUI, self).__init__()
@@ -110,6 +120,10 @@ class MainUI(QMainWindow):
         self.source_folder = ""
         self.destination_folder = ""
 
+        # ProgressBar
+        self.progressBar.setValue(0)
+
+   
     def disable_all_widgets(self, value):
 
         self.source_folder_btn.setDisabled(value)
@@ -197,33 +211,105 @@ class MainUI(QMainWindow):
         
         return duty_cycle
 
+    def foo(self):
+
+        if(self.progress_timer):
+            print(time.ctime())
+
+            try:
+                f = open('scan_cycle.txt', 'r')
+                self.scan_cycle = int(f.read()) 
+                f.close()
+                print(self.scan_cycle+1)
+                self.progressBar.setValue(int(self.scan_cycle))
+            
+            except:
+                pass
+
+            t = threading.Timer(1, self.foo)
+            t.start()
+        
+        else:
+
+            try:
+                # Read the last value for final update
+                f = open('scan_cycle.txt', 'r')
+                self.scan_cycle = int(f.read())    
+                f.close()
+                print(self.scan_cycle)
+                self.progressBar.setValue(int(self.scan_cycle))
+                # Reset the output file scan cycle value
+                with open('scan_cycle.txt', 'w') as output:
+                    output.write(str(0))
+                print(time.ctime())
+            
+            except:
+                pass
+
     def convert_btn_handler(self):
 
         #self.disable_all_widgets(True)
-
         duty_cycle = self.build_duty_cycle()
 
-        # executable_command = self.d2c_cmd_builder(self.debug_cb.isChecked(), duty_cycle, self.calibration_cb.isChecked(), self.version_cb.isChecked())
-        executable_command = self.d2c_cmd_builder(duty_cycle, self.calibration_cb.isChecked())
-     
-        
-        self.info_panel_ta.appendPlainText('Please wait while data are being converted...')
-        self.info_panel_ta.appendPlainText("")
         self.disable_all_widgets(True)
 
-        #self.thread0 = threading.Thread(target=self.disable_all_widgets, args=(True,))
-        #self.thread0.start()
-        #self.thread0.join()
+        # Convert data for each subfolder
+        for i in range(len(self.subdirs)):
 
-        self.thread = threading.Thread(target=self.exec_cmd, args=(executable_command,))
-        self.thread.start()
-        #self.thread.join()
+            # Reset the progress bar and associate the scan_cycles to its max value 
+            self.progressBar.reset()
+            self.progressBar.setRange(0,self.scan_cycles[i])
+            self.progressBar.setValue(0)
+            
+            self.progress_timer = True
+            self.foo()
+
+            self.info_panel_ta.repaint()
+            self.info_panel_ta.appendPlainText('Please wait while data are being converted...')
+            # self.info_panel_ta.appendPlainText('Folder: ' + self.subdirs[i])
+
+            # executable_command = self.d2c_cmd_builder(self.debug_cb.isChecked(), duty_cycle, self.calibration_cb.isChecked(), self.version_cb.isChecked())
+            executable_command = self.d2c_cmd_builder(duty_cycle, self.calibration_cb.isChecked(), self.subdirs[i])
+            self.info_panel_ta.setCurrentCharFormat(self.color_format_hld) 
+            self.updateText.emit('COMMAND TO BE EXECUTED:')
+            self.info_panel_ta.setCurrentCharFormat(self.color_format_std) 
+            self.info_panel_ta.appendPlainText(executable_command)
+            # self.info_panel_ta.appendPlainText("")   
+            self.info_panel_ta.repaint()
+            #self.thread0 = threading.Thread(target=self.disable_all_widgets, args=(True,))
+            #self.thread0.start()
+            #self.thread0.join()
+
+            self.thread = threading.Thread(target=self.exec_cmd, args=(executable_command,))
+            self.thread.daemon = True # apparently it makes possible to update the GUI before executing the thread
+            self.thread.start()
+            self.thread.join()
+
+            
+            if self.p_returncode != 0:
+            # handle error
+                self.updateChrText.emit(self.color_format_err)
+                self.updateText.emit('PROCESS RETURNED ERRORS')
+                self.updateChrText.emit(self.color_format_std) 
+                self.updateText.emit(self.p_stderr) # stderr is a byte object and must be converted
+                self.updateText.emit(self.p_stdout) 
+                self.info_panel_ta.repaint()
+            else:
+                self.updateChrText.emit(self.color_format_hld) 
+                self.updateText.emit('PROCESS SUCCESSFULLY COMPLETED')
+                self.updateChrText.emit(self.color_format_std) 
+                self.updateText.emit("")
+                self.info_panel_ta.repaint()
+            
+        self.disable_all_widgets(False)
+        self.convert_btn.setDisabled(True)   
     
     def verify_btn_handler(self):
         
         file_error = False
-        duty_cycle = self.build_duty_cycle()
-        executable_command = self.d2c_cmd_builder(duty_cycle, self.calibration_cb.isChecked())      
+        duty_cycle = self.build_duty_cycle()  
+
+        self.scan_cycles.clear()
         
         self.info_panel_ta.setCurrentCharFormat(self.color_format_hld) 
         self.info_panel_ta.appendPlainText('PARAMETERS SUMMARY:')
@@ -234,40 +320,56 @@ class MainUI(QMainWindow):
         # self.info_panel_ta.appendPlainText('Version -> ' + str(self.version_cb.isChecked()))
         self.info_panel_ta.appendPlainText('Mode -> ' + str( self.mode_cmb.currentText()))
         # self.info_panel_ta.appendPlainText('Backend -> ' + str( self.backend_cmb.currentText()))
-        self.info_panel_ta.setCurrentCharFormat(self.color_format_hld)
+        # self.info_panel_ta.setCurrentCharFormat(self.color_format_hld)
         self.info_panel_ta.appendPlainText("")
-        self.updateText.emit('COMMAND TO BE EXECUTED:')
-        self.info_panel_ta.setCurrentCharFormat(self.color_format_std) 
-        self.info_panel_ta.appendPlainText(executable_command)
-        self.info_panel_ta.appendPlainText("")
-        self.info_panel_ta.appendPlainText('Checking Duty-Cycle structure... ')
-       
-        self.disable_all_widgets(True)
-        self.info_panel_ta.repaint()
-        self.thread = threading.Thread(target=self.check_duty_cycle, args=())
-        self.thread.start()
-        self.thread.join() 
-        
-        if not (self.verify_result[0]):
 
-            self.info_panel_ta.insertPlainText('DONE. Ready to convert data!')
-            self.info_panel_ta.appendPlainText("")
-            self.disable_all_widgets(False)
-            self.enable_convert_btn()
+        # Retrieve all subfolders, if any, from the selected folder
+        self.create_subdirs()
+
+        for i in range(len(self.subdirs)):  
+
+            self.disable_all_widgets(True)
+
+            #self.info_panel_ta.appendPlainText('Checking Duty-Cycle structure... ')   
+            #self.info_panel_ta.appendPlainText('Folder: ' + self.subdirs[i])   
+
+            self.updateText.emit('Checking Duty-Cycle structure... ')   
+            self.updateText.emit('Folder: ' + self.subdirs[i])   
+
+            self.info_panel_ta.repaint()
+
+            self.thread = threading.Thread(target=self.check_duty_cycle, args=(self.subdirs[i],))
+            self.thread.daemon = True # apparently it makes possible to update the GUI before executing the thread
+            self.thread.start()
+            self.thread.join() 
+        
             
-        else:
-            # update QtextArea
-            self.info_panel_ta.insertPlainText('DONE. An error occurred!')
-            self.info_panel_ta.appendPlainText("")
-            self.info_panel_ta.setCurrentCharFormat(self.color_format_err) 
-            self.info_panel_ta.appendPlainText('Duty-Cycle #' + str(self.verify_result[1]) + ', File: ' + str(self.verify_result[2]))
-            self.info_panel_ta.setCurrentCharFormat(self.color_format_std) 
-            self.info_panel_ta.appendPlainText('')
-            self.disable_all_widgets(False)
-            self.disable_convert_btn()
+            if not (self.verify_result[0]):
+
+                self.info_panel_ta.appendPlainText("[DONE]. Duty-cycle check successfully completed.")
+                #self.info_panel_ta.insertPlainText('DONE. Ready to convert data!')
+                self.info_panel_ta.appendPlainText("")
+                self.disable_all_widgets(False)
+                self.enable_convert_btn()
+                
+            else:
+                # update QtextArea
+                # self.info_panel_ta.insertPlainText('[DONE]. Duty-Cycle check ended with errors.')
+                self.info_panel_ta.appendPlainText('[DONE]. Duty-Cycle check ended with errors.')
+                #self.info_panel_ta.appendPlainText("")
+                self.info_panel_ta.setCurrentCharFormat(self.color_format_err) 
+                self.info_panel_ta.appendPlainText('Duty-Cycle #' + str(self.verify_result[1]))
+                self.info_panel_ta.appendPlainText('File: ' + str(self.verify_result[2]))
+                self.info_panel_ta.setCurrentCharFormat(self.color_format_std) 
+                self.info_panel_ta.appendPlainText('')
+                self.disable_all_widgets(False)
+                self.disable_convert_btn()
+
+        #print(self.scan_cycles)
+            
            
 
-    def check_duty_cycle(self):
+    def check_duty_cycle(self, folder):
 
         # This method checks if the fits files contained in the source folder match the duty cycle structure
 
@@ -279,6 +381,7 @@ class MainUI(QMainWindow):
 
         mode = self.mode_cmb.currentText()
         duty_cycle_size = self.get_duty_cycle_size() 
+       
 
         # At firt, build the 'duty_cycle_flags' structure
         
@@ -303,20 +406,22 @@ class MainUI(QMainWindow):
                 
             duty_cycle_flags.append('REFCAL')
         
-        # Get useful information relative to each scan contained in the selected source folder
-        for subscan_file in os.listdir(self.source_folder):
+       
+        #for subscan_file in os.listdir(self.source_folder):
+        for subscan_file in os.listdir(folder):
 
             ext = os.path.splitext(subscan_file)[-1]
 
             if not subscan_file.lower().startswith('sum') and ext == DATA_EXTENSION:
-                subscan_path = os.path.join(self.source_folder, subscan_file)
+                #subscan_path = os.path.join(self.source_folder, subscan_file)
+                subscan_path = os.path.join(folder, subscan_file)
 
                 with fits.open(subscan_path) as subscan:
                     subscans.append((subscan_path, 
-                                     subscan[0].header["SIGNAL"],
-                                     Time(subscan["DATA TABLE"].data["time"][0],
-                                          format = "mjd",
-                                          scale = "utc")
+                                    subscan[0].header["SIGNAL"],
+                                    Time(subscan["DATA TABLE"].data["time"][0],
+                                        format = "mjd",
+                                        scale = "utc")
                 ))
         
         # Before sorting the subscans in time, the backend name must be retrieved
@@ -356,12 +461,30 @@ class MainUI(QMainWindow):
         
         # Order fits file names by internal data timestamp
         # subscans.sort(key=lambda x:x[2])
+
+
+        self.scan_cycles.append(int(len(subscans)/int(self.duty_cycle_size)))
+
         
         j = 0 # duty_cycle index
         d = 0 # duty_cycle current number
         
+        self.progressBar.reset()
+        self.progressBar.setRange(0,len(subscans))
+
         # Start fits file and duty cycle comparison
         for i in range(len(subscans)):
+
+            self.progressBar.setValue(i+1)
+
+            #self.info_panel_ta.repaint()
+            #self.updateText.emit(str(int(i+1)) + '/' + str(len(subscans)))
+            #self.info_panel_ta.repaint()
+            time.sleep(0.05)
+           
+            #print(i)
+            #print(subscans[i][1])
+            #print(duty_cycle_flags[j])
         
             if(subscans[i][1] != duty_cycle_flags[j]): # in case of mismatch
             
@@ -372,11 +495,16 @@ class MainUI(QMainWindow):
                 self.verify_result[0] = error
                 self.verify_result[1] = d
                 self.verify_result[2] = filename_err
-                
+                self.verify_result[3] = folder                    
                 break
             else:
 
                 error = False
+
+                self.verify_result[0] = error
+                self.verify_result[1] = 0
+                self.verify_result[2] = ""
+                self.verify_result[3] = ""
 
             j = j + 1
             if(j == len(duty_cycle_flags)):
@@ -414,7 +542,7 @@ class MainUI(QMainWindow):
         else:
             self.verify_btn.setDisabled(True)
       
-    def d2c_cmd_builder(self, duty_cycle, calibration):
+    def d2c_cmd_builder(self, duty_cycle, calibration, folder):
 
         cmd = "discos2class "
         #if(debug_mode):
@@ -425,7 +553,8 @@ class MainUI(QMainWindow):
             cmd = cmd + '-s '
         #if(version):
         #    cmd = cmd + '--version '
-        cmd = cmd + self.source_folder
+        # cmd = cmd + self.source_folder
+        cmd = cmd + folder
         
         return cmd
 
@@ -439,25 +568,42 @@ class MainUI(QMainWindow):
         # stdout = normal output
         # stderr = error output
 
+        #t.cancel()
+
         # p.terminate()
-        time.sleep(1)
+        self.progress_timer = False
+        
+
+        time.sleep(0.5)
         # self.convert_btn.setDisabled(False)
         
         if p.returncode != 0:
-            # handle error
-            self.updateChrText.emit(self.color_format_err)
-            self.updateText.emit('PROCESS RETURNED ERRORS')
-            self.updateChrText.emit(self.color_format_std) 
-            self.updateText.emit(stderr.decode()) # stderr is a byte object and must be converted
-            self.updateText.emit(stdout.decode())
-        else:
-            self.updateChrText.emit(self.color_format_hld) 
-            self.updateText.emit('PROCESS SUCCESSFULLY COMPLETED')
-            self.updateChrText.emit(self.color_format_std) 
-            self.updateText.emit("")
 
-        self.disable_all_widgets(False)
-        self.convert_btn.setDisabled(True)   
+            self.p_returncode = p.returncode
+            self.p_stderr = stderr.decode()
+            self.p_stdout = stdout.decode()
+
+    def create_subdirs(self):
+        # Retrieve all subfolders, if any, from the selected folder
+        self.subdirs.clear()
+
+        d = self.source_folder
+        for o in os.listdir(d):
+            if os.path.isdir(os.path.join(d,o)): 
+                if(('tmp' not in str(os.path.join(d,o))) and 'tempfits' not in str(os.path.join(d,o))):
+                    self.subdirs.append(os.path.join(d,o))
+
+        # Check if subdirs is empty. It means that the user selected a folder condaining data
+        # In this case subdirs gets the value of self.source_folder
+        if not self.subdirs:
+            self.subdirs.append(self.source_folder)
+
+        #subdirs = [os.path.join(d, o) for o in os.listdir(d) if os.path.isdir(os.path.join(d,o)) 
+        #and not 'tmp' in os.path.isdir(os.path.join(d,o)) or 'tempfits' in os.path.isdir(os.path.join(d,o))]
+        # subdirs = [x[0] for x in os.walk(self.source_folder)]
+        self.subdirs.sort()
+        print(self.subdirs)
+    
         
 if __name__ == "__main__":
     # The next line solves the issues of mismatch between designer sizes and monitor sizes
